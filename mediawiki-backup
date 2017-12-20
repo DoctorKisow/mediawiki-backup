@@ -1,0 +1,883 @@
+#!/bin/bash
+#
+# mediawiki-backup - A backup script for a MySQL based MediaWiki enviornment.
+# Copyright (c) 2015-2017 Matthew R. Kisow, D.Sc. <matthew.kisow@kisow.org>
+#
+# License (GPL v3.0)
+# ------------------
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+set -e
+set -u
+shopt -s nullglob
+
+# Scroll to the bottom of this script to follow the main program flow.
+
+# ********************** variables *********************
+PROGNAME="$(basename "${0}")"
+CONFFILE="/etc/${PROGNAME}.conf"
+INSTALLDIR="/usr/sbin"
+VERSION="0.0.1"
+PROGRAM_NAME="MediaWiki Backup Utility"
+PROGRAM_DESCRIPTION="A backup script for a MySQL based MediaWiki environment."
+COPYRIGHT_TEXT="Copyright (c) 2015-2017"
+AUTHOR_TEXT="Dr. Matthew R. Kisow"
+
+RED_TEXT="" GREEN_TEXT="" YELLOW_TEXT="" BLUE_TEXT="" MAGENTA_TEXT="" CYAN_TEXT="" WHITE_TEXT="" RESET_ATTS=""  ALERT_TEXT=""
+if [[ -v TERM && -n "${TERM}" && "${TERM}" != "dumb" ]]; then
+    RED_TEXT="$(tput setaf 1)$(tput bold)"
+    GREEN_TEXT="$(tput setaf 2)$(tput bold)"
+    YELLOW_TEXT="$(tput setaf 3)$(tput bold)"
+    BLUE_TEXT="$(tput setaf 4)$(tput bold)"
+    MAGENTA_TEXT="$(tput setaf 5)$(tput bold)"
+    CYAN_TEXT="$(tput setaf 6)$(tput bold)"
+    WHITE_TEXT="$(tput setaf 7)$(tput bold)"
+    RESET_ATTS="$(tput sgr0)"
+    ALERT_TEXT="$(tput bel)"
+fi
+
+VERBOSITY=1
+
+PREFIXSTRING="* "
+SHOWPREFIX="${GREEN_TEXT}${PREFIXSTRING}${RESET_ATTS}"
+SHOWSUFFIX=""
+
+# Database Connection String.
+DBHOST="localhost"
+DBNAME="mediawiki"
+DBUSER="root"
+DBPASS="password"
+
+# Date-Stamps.
+DATESTAMP=`date +%d%b%Y`
+DATESTAMP=${DATESTAMP^^}
+
+# Directories.
+FQDN="wiki.example.com"
+BACKUPDIR="/MediaWikiBackup"
+WEBROOTDIR="/var/www"
+SITEDIR="mediawiki-1.27.3"
+TEMPDIR="$BACKUPDIR/$FQDN-$DATESTAMP"
+
+# Logfile.
+LOGFILE="$BACKUPDIR/$FQDN-backup.log"
+
+# Number of Backup's to Keep.
+KEEPBACKUP="10"
+
+# Used by menu-driven configuration settings.
+declare -i CONFIGDIRTY=0
+CONFVARS=("DBHOST" "DBNAME" "DBUSER" "DBPASS" "FQDN" "BACKUPDIR" "WEBROOTDIR" "SITEDIR" "KEEPBACKUP")
+
+# Script arguement booleans.
+declare -i ARG_BACKUP=0 ARG_BACKUPROOT=0 ARG_CONFIG=0 ARG_USECONFIG=0 ARG_CRON=0 ARG_UNCRON=0 ARG_DBHOST=0 ARG_DBNAME=0 ARG_INSTALL=0 ARG_UNINSTALL=0 ARG_DBPASS=0 ARG_DBUSER=0 ARG_HELP=0 ARG_LOG=0 ARG_RESTORE=0 ARG_VERSION=0 ARG_WEBROOT=0 ARG_SITEDIR=0
+
+# ***************** various functions ******************
+function cleanup_and_exit_with_code ()
+{
+     # If output was redirected to the logfile during an interactive session, repoint it to the console.
+     exec &>$(tty)
+
+     set +e
+     trap - EXIT
+     cleanup_temp_files
+     exit $1
+}
+
+function script_banner ()
+{
+     clear
+     printf "${WHITE_TEXT}${PROGRAM_NAME}${RESET_ATTS}\n"
+     printf "${CYAN_TEXT}${COPYRIGHT_TEXT}, ${AUTHOR_TEXT}\n${RESET_ATTS}"
+     printf -- "--------------------------------------------------------------------------------\n\n\n"
+}
+
+function showmenu ()
+{
+     script_banner
+     local MESSAGE=${1:-""}
+     printf "${CYAN_TEXT}${MESSAGE}${RESET_ATTS}"
+}
+
+function show ()
+{
+     local MESSAGE=${1:-""}
+     local VERBLEVEL=${2:-${VERBOSITY}}
+     if (( VERBLEVEL >=1 )); then
+          echo -e "${SHOWPREFIX}${MESSAGE}${SHOWSUFFIX}"
+     fi
+}
+
+function warning ()
+{
+    echo -e "${YELLOW_TEXT}${PREFIXSTRING}${RESET_ATTS}${PROGNAME}: Warning: ${1}" >&2
+}
+
+function die ()
+{
+    echo
+    echo -e "${RED_TEXT}${PREFIXSTRING}${RESET_ATTS}${PROGNAME}: Error: ${1} - exiting" >&2
+    cleanup_and_exit_with_code 1
+}
+
+function trap_cleanup ()
+{
+     trap - SIGHUP SIGQUIT SIGINT SIGTERM SIGKILL EXIT
+     die "Caught signal"
+}
+trap trap_cleanup SIGHUP SIGQUIT SIGINT SIGTERM SIGKILL EXIT
+
+function test_yn ()
+{
+     echo -n -e "${SHOWPREFIX}${1} (y/n)? ${SHOWSUFFIX}${ALERT_TEXT}"
+     read -r -n 1
+     echo
+     if [[ ${REPLY} =~ ^[Yy]$ ]]; then
+          return 0
+     else
+          return 1
+     fi
+}
+
+function test_yn_need_enter ()
+{
+     echo -n -e "${SHOWPREFIX}${1} (y/n)? ${SHOWSUFFIX}${ALERT_TEXT}"
+     read -r
+     echo
+     if [[ ${REPLY} =~ ^[Yy]$ ]]; then
+          return 0
+     else
+          return 1
+     fi
+}
+
+function cleanup_temp_files ()
+{
+     # Cleanup any temporary files created by the script, if they exist.
+     if [ -e $TEMPDIR ]; then
+          rm -r $TEMPDIR
+     fi
+}
+
+function interactively_set_config ()
+{
+     declare -i DOSAVE=0 DOEXIT=0
+     declare -a TOPMENU=("Database Connection Settings" "MediaWiki Site" "Directory Settings" "Backups to Keep" "Exit without saving" "Save and exit")
+     local X
+     PS3="Your choice: "
+     until ((DOEXIT==1)); do
+          clear
+          showmenu "Configuration File Setup:"
+          show_current_config
+          show "Please choose an option:"
+          select X in "${TOPMENU[@]}"; do
+               printf "\n"
+               case "${X}" in
+                    "Database Connection Settings") set_db; break ;;
+                    "MediaWiki Site") set_sitename; break ;;
+                    "Directory Settings") set_directories; break ;;
+                    "Backups to Keep") set_num_backups; break;;
+                    "Exit without saving") DOEXIT=1; break ;;
+                    "Save and exit") DOSAVE=1; DOEXIT=1; break ;;
+                    *) warning "Please choose one of the menu options!"; break ;;
+               esac
+          done
+
+          if ((DOEXIT==1 && DOSAVE==0 && CONFIGDIRTY==1)); then
+               if ! test_yn_need_enter "Are you sure? Your changes will be lost. Proceed"; then
+                    DOEXIT=0
+               fi
+          fi
+     done
+
+     if ((DOSAVE==0)); then
+          if ((CONFIGDIRTY==1)); then
+               warning "As instructed, your changes were not saved!"
+          else
+               show "Configuration unchanged."
+          fi
+     else
+          if ((CONFIGDIRTY==1)); then
+               save_config
+               show "Configuration saved to ${CONFFILE}."
+          else
+               show "Configuration is unchanged, nothing to save."
+          fi
+     fi
+}
+
+function show_current_config ()
+{
+     local MODFLAG=""
+     if ((CONFIGDIRTY==1)); then
+          MODFLAG=" - MODIFIED"
+     fi
+
+     printf "\n"
+     show "Current configuration (from ${CONFFILE}${MODFLAG}):"
+     printf "\n"
+     printf "  Database hostname:                %-36s\n" "${DBHOST}"
+     printf "  Database name:                    %-36s\n" "${DBNAME}"
+     printf "  Database username:                %-36s\n" "${DBUSER}"
+     printf "  Database password:                %-36s\n" "${DBPASS}"
+     printf "\n"
+     printf "  FQDN for the MediaWiki Website:   %-36s\n" "${FQDN}"
+     printf "\n"
+     printf "  Backup Directory:                 %-36s\n" "${BACKUPDIR}"
+     printf "  Website Root Directory:           %-36s\n" "${WEBROOTDIR}"
+     printf "  Website Directory:                %-36s\n" "${SITEDIR}"
+     printf "\n"
+     printf "  Backup's to Keep:                 %-36s\n" "${KEEPBACKUP}"
+     printf "\n"
+}
+
+function set_db ()
+{
+     local -i DOEXIT=0
+     declare -a DBMENU=("Database Hostname" "Database Name" "Database User"  "Database Password" "Main Menu")
+     local X
+     until ((DOEXIT==1)); do
+          clear
+          showmenu "Database Connection Settings:"
+          show "Current Database Settings:"
+          show_db_settings
+          show "Please set your database connection (or Main Menu):"
+          select X in "${DBMENU[@]}"; do
+               case "${X}" in
+                    "Database Hostname")
+                         if [ -n DBHOST ]; then
+                              CONFIGDIRTY=1
+                         fi
+                         printf "Enter the hostname of the MediaWiki database server: "
+                         read -r DBHOST
+                         DOEXIT=0
+                         break ;;
+                    "Database Name")
+                         if [ -n DBNAME ]; then
+                              CONFIGDIRTY=1
+                         fi
+                         printf "Enter the name of the MediaWiki database: "
+                         read -r DBNAME
+                         DOEXIT=0
+                         break ;;
+                    "Database User")
+                         if [ -n DBUSER ]; then
+                              CONFIGDIRTY=1
+                         fi
+                         printf "Enter the name of the user authorized to backup the MediaWiki database: "
+                         read -r DBUSER
+                         DOEXIT=0
+                         break ;;
+                    "Database Password")
+                         if [ -n DBPASS ]; then
+                              CONFIGDIRTY=1
+                         fi
+                         printf "Enter the password for the $DBUSER user: "
+                         read -r DBPASS
+                         DOEXIT=0
+                         break ;;
+                    "Main Menu")
+                         DOEXIT=1;
+                         break ;;
+                    *) warning "Please choose one of the menu options!"; break ;;
+               esac
+          done
+     done
+}
+
+function show_db_settings ()
+{
+     printf "\n"
+     printf "  Database hostname:                %-36s\n" "${DBHOST}"
+     printf "  Database name:                    %-36s\n" "${DBNAME}"
+     printf "  Database username:                %-36s\n" "${DBUSER}"
+     printf "  Database password:                %-36s\n" "${DBPASS}"
+     printf "\n"
+}
+
+function set_sitename ()
+{
+     local -i DOEXIT=0
+     declare -a SITEMENU=("MediaWiki Sitename" "Main Menu")
+     local X
+     until ((DOEXIT==1)); do
+          clear
+          showmenu "MediaWiki Sitename Settings:"
+          show_sitename_settings
+          show "Please set your MediaWiki sitename (or Main Menu):"
+          select X in "${SITEMENU[@]}"; do
+               case "${X}" in
+                    "MediaWiki Sitename")
+                         if [ -n FQDN ]; then
+                              CONFIGDIRTY=1
+                         fi
+                         printf "Enter the MediaWiki's FQDN (Fully Qualified Domain Name): "
+                         read -r FQDN
+                         DOEXIT=1
+                         break ;;
+                    "Main Menu")
+                         DOEXIT=1;
+                         break ;;
+                    *) warning "Please choose one of the menu options!"; break ;;
+               esac
+          done
+     done
+}
+
+function show_sitename_settings ()
+{
+     printf "\n"
+     printf "  FQDN for the MediaWiki Website:   %-36s\n" "${FQDN}"
+     printf "\n"
+}
+
+function set_directories ()
+{
+     local -i DOEXIT=0
+     declare -a DIRMENU=("Backup Directory" "Webroot Directory" "Website Directory" "Main Menu")
+     local X
+     until ((DOEXIT==1)); do
+          clear
+          showmenu "Directory Settings:"
+          show_dir_settings
+          show "Please set your backup and webroot directories (or Main Menu):"
+          select X in "${DIRMENU[@]}"; do
+               case "${X}" in
+                    "Backup Directory")
+                         if [ -n BACKUPDIR ]; then
+                              CONFIGDIRTY=1
+                         fi
+                         printf "Enter the location of the backup folder: "
+                         read -r BACKUPDIR
+                         DOEXIT=0
+                         break ;;
+                    "Webroot Directory")
+                         if [ -n WEBROOTDIR ]; then
+                              CONFIGDIRTY=1
+                         fi
+                         printf "Enter the location of MediaWiki's webroot folder: "
+                         read -r WEBROOTDIR
+                         DOEXIT=0
+                         break ;;
+                    "Website Directory")
+                         if [ -n SITEDIR ]; then
+                              CONFIGDIRTY=1
+                         fi
+                         printf "Enter the location of MediaWiki's website folder: "
+                         read -r SITEDIR
+                         DOEXIT=0
+                         break ;;
+                    "Main Menu")
+                         DOEXIT=1;
+                         break ;;
+                    *) warning "Please choose one of the menu options!"; break ;;
+               esac
+          done
+     done
+}
+
+function show_dir_settings ()
+{
+     printf "\n"
+     printf "  Backup Directory:                 %-36s\n" "${BACKUPDIR}"
+     printf "  Website Root Directory:           %-36s\n" "${WEBROOTDIR}"
+     printf "  Website Directory:                %-36s\n" "${SITEDIR}"
+     printf "\n"
+}
+
+function set_num_backups ()
+{
+     local -i DOEXIT=0
+     declare -a NUMMENU=("Backup's to Keep" "Main Menu")
+     local X
+     until ((DOEXIT==1)); do
+          clear
+          showmenu "Number of Backup Settings:"
+          show_num_backups
+          show "Please set the number of backups you want to keep (or Main Menu):"
+          select X in "${NUMMENU[@]}"; do
+               case "${X}" in
+                    "Backup's to Keep")
+                         if [ -n KEEPBACKUP ]; then
+                              CONFIGDIRTY=1
+                         fi
+                         printf "Enter the number of backups to keep: "
+                         read -r KEEPBACKUP
+                         DOEXIT=1
+                         break ;;
+                    "Main Menu")
+                         DOEXIT=1;
+                         break ;;
+                    *) warning "Please choose one of the menu options!"; break ;;
+               esac
+          done
+     done
+}
+
+function show_num_backups ()
+{
+     printf "\n"
+     printf "  Backup's to Keep:                 %-36s\n" "${KEEPBACKUP}"
+     printf "\n"
+}
+
+function save_config ()
+{
+     local NEXTVAR NEXTDEFAULTVAR
+     # Comment out any existing definition.
+     if [ -e ${CONFFILE} ]; then
+          for NEXTVAR in "${CONFVARS[@]}"; do
+               sed -i "/^${NEXTVAR}=/s/^/# /" "${CONFFILE}"
+          done
+
+          # Remove any existing 'auto' section, if there is one.
+          sed -i '/^# Automatically added by '"${PROGNAME}"' - edits here may be overwritten/,/^# End of automatically added section/d' "${CONFFILE}"
+     fi
+
+     # Append the remaining definitions to the end.
+     printf "# Automatically added by ${PROGNAME} - edits here may be overwritten\n" >> "${CONFFILE}"
+     for NEXTVAR in "${CONFVARS[@]}"; do
+          if [[ -v "${NEXTVAR}" ]] ; then
+          # Don't write out values if the default value is already set
+          NEXTDEFAULTVAR="DEFAULT${NEXTVAR}"
+          if [[ -v "${NEXTDEFAULTVAR}" && "${!NEXTVAR}" == "${!NEXTDEFAULTVAR}" ]] ; then
+               continue
+          fi
+               printf "${NEXTVAR}=\"${!NEXTVAR}\"\n" >> "${CONFFILE}"
+          fi
+     done
+     printf "# End of automatically added section\n" >> "${CONFFILE}"
+}
+
+function configuration_file ()
+{
+     if !((ARG_INSTALL==1 || ARG_UNINSTALL==1)); then
+          if [ ! -s "${CONFFILE}" ]; then
+               warning "${CONFFILE} does not exist."
+               if test_yn "Would you like to set this up now"; then
+                    interactively_set_config
+                    cleanup_and_exit_with_code 0
+               else
+                    die "Cannot proceed; please create ${CONFFILE} manually."
+               fi
+          fi
+          
+          source "${CONFFILE}"
+     fi
+}
+
+function print_usage ()
+{
+     cat << EOF
+  Usage: ${PROGNAME} [options]
+
+  Options:
+    -b, --backup            backup the mediawiki files and database
+    -B, --backupdir         backup directory for MediaWiki
+    -c, --set-configuration setup the configuration file
+    -C, --use-configuration use configuration file to backup or restore
+    -h, --help              show this help message and exit
+    -H, --dbhost            database hostname
+    -i, --install           install ${PROGNAME}
+    -I, --uninstall         uninstall ${PROGNAME}
+    -l, --log               log output to backup directory
+    -N, --dbname            database name
+    -P, --dbpass            database password
+    -r, --restore           restore mediawiki from an archive
+    -s, --set-reoccurring   setup a daily cron job
+    -S, --unset-reoccurring remove the daily cron job
+    -U, --dbuser            database username
+    -v, --version           display the version number of ${PROGNAME} and exit
+    -w, --webroot           website directory for MediaWiki
+
+EOF
+}
+
+function help ()
+{
+    printf "${PROGNAME} - ${PROGRAM_DESCRIPTION}\n"
+    print_usage
+}
+
+function print_version ()
+{
+     printf "%s\n" "${VERSION}"
+}
+
+function display_usage_message_and_bail_out ()
+{
+    if [ ! -z "${1+x}" ]; then
+        printf "%s: %s\n" "${PROGNAME}" "${1}" >&2
+    fi
+
+    print_usage >&2
+    cleanup_and_exit_with_code 1
+}
+
+function check_superuser ()
+{
+     if [[ $USER != "root" ]]; then
+          warning "This script must be run as a root user."
+          cleanup_and_exit_with_code 1
+     fi
+}
+
+function internal_consistency_option_checks()
+{
+     ### The following are not exhaustive, just some more obvious snafus.
+     
+     # If help is run with ANY other option exit.
+     if ((ARG_HELP==1)); then 
+          if ((ARG_BACKUP==1 || ARG_BACKUPROOT==1 || ARG_CONFIG==1 || ARG_USECONFIG==1 || ARG_CRON==1 || ARG_UNCRON==1 || ARG_DBHOST==1 || ARG_DBNAME==1 || ARG_INSTALL==1 || ARG_UNINSTALL==1 || ARG_DBPASS==1 || ARG_DBUSER==1 || ARG_LOG==1 || ARG_RESTORE==1 || ARG_VERSION==1 || ARG_WEBROOT==1 || ARG_SITEDIR==1)); then
+               warning "You cannot use the help option with any other option!"
+               cleanup_and_exit_with_code 1
+          fi
+     fi
+
+     # If you are running a backup or restore you must supply the directory or configuration options.
+     if ((ARG_BACKUP==1 || ARG_RESTORE==1)); then
+          if ((ARG_BACKUPROOT==0 || ARG_WEBROOT==0)); then
+               if ((ARG_USECONFIG==0)); then
+                    warning "When performing a backup or restore operation you must either specify the backup/restore and webroot directories or use the configuration file switch."
+                    cleanup_and_exit_with_code 1
+               fi
+          fi
+     fi
+
+     # If you are running a backup or restore you must supply the database settings or configuration options.
+     if ((ARG_BACKUP==1 || ARG_RESTORE==1)); then
+          if ((ARG_DBHOST==0 || ARG_DBNAME==0 || ARG_DBUSER==0 || ARG_DBPASS==0)); then
+               if ((ARG_USECONFIG==0)); then
+                    warning "When performing a backup or restore you must either specify the database connection string or use the configuration file switch."
+                    cleanup_and_exit_with_code 1
+               fi
+          fi
+     fi
+
+     # If you attempt to setup or remove cron in the same operation then exit.
+     if ((ARG_CRON==1 && ARG_UNCRON==1)); then
+          warning "You cannot set and unset the cron job in the same operation!"
+          cleanup_and_exit_with_code 1
+     fi
+     
+     # If install or uninstall is run with ANY other option exit.
+     if ((ARG_INSTALL==1 || ARG_UNINSTALL==1)); then
+          if ((ARG_BACKUP==1 || ARG_BACKUPROOT==1 || ARG_CONFIG==1 || ARG_USECONFIG==1 || ARG_CRON==1 || ARG_UNCRON==1 || ARG_DBHOST==1 || ARG_DBNAME==1 || ARG_DBPASS==1 || ARG_DBUSER==1 || ARG_HELP==1 || ARG_LOG==1 || ARG_RESTORE==1 || ARG_VERSION==1 || ARG_WEBROOT==1 || ARG_SITEDIR==1)); then
+               warning "You cannot use the install or uninstall option with any other option!"
+               cleanup_and_exit_with_code 1
+          fi
+     fi
+     
+     # If you attempt to install and uninstall in the same operation then exit.
+     if ((ARG_INSTALL==1 && ARG_UNINSTALL==1)); then
+          warning "You cannot use the install and uninstall script options in the same operation!"
+          cleanup_and_exit_with_code 1
+     fi
+}
+
+function process_command_line_options ()
+{
+     local TEMP
+     declare -i RC
+
+     # If no options are passed, print the usage and exit.
+     if [[ ! $@ =~ [^\-.+]|[^\--.+] ]]; then
+          print_usage
+          cleanup_and_exit_with_code 1
+     fi
+
+     set +e
+          # Error trapping is turned off because we want to handle errors.
+          TEMP="$(getopt -o bB:cChH:iIlN:P:rsSU:vw: --long backup,backuproot:,set-configuration,use-configuration,help,dbhost:,install,uninstall,log,dbname:,dppass:,restore,set-reoccurring,unset-reoccurring,dbuser:,version,webroot: -n "${PROGNAME}" -- "${@}")"
+          RC="${?}"
+     set -e
+
+     # Check if any invalid options were passed and display help.
+     if ((RC!=0)); then
+          display_usage_message_and_bail_out
+     fi
+     eval set -- "${TEMP}"
+
+     # Extract the options and their arguments into variables.
+     while true ; do
+          case "${1}" in
+          -b|--backup) ARG_BACKUP=1; shift ;;
+          -B|--backuproot) ARG_BACKUPROOT=1;
+               case "${2}" in
+                    "") shift 2 ;;
+                     *) BACKUPDIR="${2}"; shift 2 ;;
+               esac ;;
+          -c|--set-configuration) ARG_CONFIG=1; shift ;;
+          -C|--use-configuration) ARG_USECONFIG=1; shift ;;
+          -h|--help) ARG_HELP=1; shift ;;
+          -H|--dbhost) ARG_DBHOST=1;
+               case "${2}" in
+                    "") shift 2;;
+                     *) DBHOST="${2}"; shift 2;;
+               esac ;;
+          -i|--install) ARG_INSTALL=1; shift ;;
+          -I|--uninstall) ARG_UNINSTALL=1; shift ;;
+          -l|--log) ARG_LOG=1; shift ;;
+          -N|--dbname) ARG_DBNAME=1;
+               case "${2}" in
+                    "") shift 2;;
+                     *) DBNAME="${2}"; shift 2;;
+               esac ;;
+          -P|--dbpass) AGR_DBPASS=1;
+               case "${2}" in
+                    "") shift 2;;
+                     *) DBPASS="${2}"; shift 2;;
+               esac ;;
+          -r|--restore) ARG_RESTORE=1; shift ;;
+          -s|--set-reoccurring) ARG_CRON=1; shift ;;
+          -S|--unset-reoccurring) ARG_UNCRON=1; shift ;;
+          -U|--dbuser) ARG_DBUSER=1;
+               case "${2}" in
+                    "") shift 2 ;;
+                     *) DBUSER="${2}"; shift 2 ;;
+               esac ;;
+          -v|--version) ARG_VERSION=1; shift ;;
+          -w|--webroot) ARG_WEBROOT=1;
+               case "${2}" in
+                    "") shift 2;;
+                     *) WEBROOTDIR="${2}"; shift 2 ;;
+               esac ;;
+          --) shift; break ;;
+           *) print_usage ;;
+          esac
+     done
+
+     internal_consistency_option_checks
+
+     # Process 'perform-then-exit' options.
+     if ((ARG_HELP==1)); then
+          print_usage
+          cleanup_and_exit_with_code 0
+     elif ((ARG_VERSION==1)); then
+          print_version
+          cleanup_and_exit_with_code 0
+     elif ((ARG_CONFIG==1)); then
+          configuration_file
+          interactively_set_config
+          cleanup_and_exit_with_code 0
+     fi
+}
+
+function backup_mediawiki ()
+{
+     # Set the temporary directory based on what is set from either the CLI or configuration file.
+     TEMPDIR=$BACKUPDIR/$FQDN-$DATESTAMP
+
+     # Set logging.
+     if ((ARG_LOG==1)); then
+          # Set the logfile based on what is set from either the CLI or configuration file.
+          LOGFILE=$BACKUPDIR/$FQDN-backup.log
+          exec > >(tee -a $LOGFILE)
+          exec 2>&1
+     fi
+
+     # Cleanup old backups.
+     if [ "$(ls ${BACKUPDIR} | wc -l)" -gt ${KEEPBACKUP} ]; then
+          ls -t $BACKUPDIR/*.tgz | sed -e "1,${KEEPBACKUP}d" | xargs -d '\n' rm
+     fi
+
+     # Create a temporary working directory to archive the site and the database in.
+     printf "Beginning $FQDN site backup.\n"
+     printf "Creating the temporary working directory at $TEMPDIR.\n"
+     mkdir -p $TEMPDIR
+
+     # Backup the MediaWiki website directory.
+     printf "Creating a Tape ARchive (TAR) file of the MediaWiki site.\n"
+     tar -cf $TEMPDIR/filecontent.tar -C $WEBROOTDIR $SITEDIR/.
+
+     # Backup the MediaWiki database.
+     printf "Backing up the MySQL MediaWiki database $DBNAME.\n"
+     mysqldump --host=$DBHOST --user=$DBUSER --password=$DBPASS --add-drop-table $DBNAME > $TEMPDIR/dbcontent.sql
+
+     # Create a compressed archive of the files and database.
+     if [ ! -e  $BACKUPDIR/$FQDN-$DATESTAMP.tgz ]; then
+          printf "Creating and compressing the final TARball archive.\n"
+          tar -czf $BACKUPDIR/$FQDN-$DATESTAMP.tgz -C $TEMPDIR {filecontent.tar,dbcontent.sql}
+     else
+          warning "The file $BACKUPDIR/$FQDN-$DATESTAMP.tgz already exists."
+          if test_yn "Would you like to overright"; then
+               rm  $BACKUPDIR/$FQDN-$DATESTAMP.tgz
+               
+               printf "Creating and compressing the final TARball archive.\n"
+               tar -czf $BACKUPDIR/$FQDN-$DATESTAMP.tgz -C $TEMPDIR {filecontent.tar,dbcontent.sql}
+          else
+               cleanup_and_exit_with_code 1
+          fi
+     fi
+     
+     # Remove the working directory.
+     printf "Removing the temporary working dir $TEMPDIR.\n"
+     rm -r $TEMPDIR
+
+     printf "Backup completed and located at $BACKUPDIR/$FQDN-$DATESTAMP.tgz.\n\n"
+}
+
+function restore_mediawiki ()
+{
+     # For-loop variables.
+     local I=1 J
+
+     # Listing of restore archive files.
+     local FILE_LIST
+
+     # Variable that will be extracted from the selected file.
+     local FQDNDATESTAMP
+
+     # Present a menu of archives to restore from.
+     printf "Please select the archive to restore.\n\n"
+
+     FILE_LIST=$(ls $BACKUPDIR/*.tgz)
+
+     for J in $FILE_LIST; do
+          printf "$I.$J\n"
+          FILE_LIST[I]=$J
+          I=$((I+1))
+     done
+
+     printf "\nEnter number: "
+     read INPUT
+
+     # Set the temporary directory based on the location and name of the choosen archive.
+     FQDNDATESTAMP=$(echo ${FILE_LIST[$INPUT]} | sed 's/.\{4\}$//')
+
+     # Create a temporary working directory to restore the site and the database in.
+     printf "\n  Creating a temporary working directory at $FQDNDATESTAMP.\n"
+     mkdir -p $FQDNDATESTAMP
+
+     # Extract the archive.
+     printf "  Recovering the archive into $FQDNDATESTAMP.\n"
+     tar -xzf ${FILE_LIST[$INPUT]} -C $FQDNDATESTAMP
+     
+     printf "  Recovering the MediaWiki site into $FQDNDATESTAMP.\n"
+     tar -xf $FQDNDATESTAMP/filecontent.tar -C $FQDNDATESTAMP
+     rm $FQDNDATESTAMP/filecontent.tar
+     #cp -TR $FQDNDATESTAMP/$SITEDIR/ $WEBROOTDIR/$SITEDIR/
+     
+     printf "  Restoring the SQL database.\n"
+     #mysql -u $DBUSER -p $DBPASS $DBNAME < $FQDNDATESTAMP/dbcontent.sql
+}
+
+function cron_management ()
+{
+     if [ ! -e ${INSTALLDIR} ]; then
+          warning "To properly setup a daily cron job you must first install the script."
+          cleanup_and_exit_with_code 1
+     fi
+     
+     if ((ARG_CRON==1)); then
+          if [ -e /etc/cron.daily/mediawiki-backup ]; then
+               warning "A daily cron job already setup."
+               cleanup_and_exit_with_code 1
+          fi
+
+          printf "  Setting up a daily cron job for MediaWiki backup.\n"
+          printf "#!/bin/bash\n" >> /etc/cron.daily/mediawiki-backup
+          printf "${INSTALLDIR} -b -C -l" >> /etc/cron.daily/mediawiki-backup
+
+          # Set permissions and ownership.
+          chmod 755 /etc/cron.daily/mediawiki-backup
+          chown root:root /etc/cron.daily/mediawiki-backup
+
+          cleanup_and_exit_with_code 0
+     fi
+
+     if ((ARG_UNCRON==1)); then
+          if [ ! -e /etc/cron.daily/mediawiki-backup ]; then
+               warning "A daily cron job is not already setup."
+               cleanup_and_exit_with_code 1
+          fi
+
+          printf "  Removing the daily cron job for MediaWiki backup.\n"
+          rm /etc/cron.daily/mediawiki-backup
+     fi
+}
+
+function install_script ()
+{
+     local SCRIPT_PATH
+     
+     # Obtain the relative and absolute path where the script is executed from.
+     SCRIPT_PATH="`dirname \"$0\"`"
+     SCRIPT_PATH="`( cd \"$SCRIPT_PATH\" && pwd )`"
+
+     # Exit if the script path cannot be determined.
+     if [ -z "${SCRIPT_PATH}" ] ; then
+          warning "The script path is not accessible."
+          cleanup_and_exit_with_code 1
+     fi
+
+     if ((ARG_INSTALL==1)); then
+          if [ -e "${INSTALLDIR}/${PROGNAME}" ]; then
+               warning "The ${PROGNAME} script is already installed."
+               cleanup_and_exit_with_code 1
+          fi
+
+          # Install script from the download directory.
+          printf "  Installing ${PROGNAME} to ${INSTALLDIR}.\n"
+          cp "${SCRIPT_PATH}/${PROGNAME}" "${INSTALLDIR}/${PROGNAME}"
+          
+          # Set permissions and ownership.
+          chmod 755 "${INSTALLDIR}/${PROGNAME}"
+          chown root:root "${INSTALLDIR}/${PROGNAME}"
+
+          cleanup_and_exit_with_code 0
+     fi
+
+     if ((ARG_UNINSTALL==1)); then
+          if [ ! -e "${INSTALLDIR}/${PROGNAME}" ]; then
+               warning "The ${PROGNAME} script is already uninstalled."
+               cleanup_and_exit_with_code 1
+          fi
+
+          # Remove the script form /usr/sbin.
+          printf "  Uninstalling ${PROGNAME} from ${INSTALLDIR}.\n"
+          rm "${INSTALLDIR}/${PROGNAME}"
+          
+          printf "  Cleaning up configuration files from /etc/${PROGNAME}.\n"
+          rm "${CONFFILE}"
+     fi
+}
+
+# *************** begin of script proper ***************
+script_banner
+check_superuser
+process_command_line_options "${@}"
+configuration_file
+
+if ((ARG_BACKUP==1)); then
+     backup_mediawiki
+fi
+
+if ((ARG_RESTORE==1)); then
+     restore_mediawiki
+fi
+
+if ((ARG_CRON==1 || ARG_UNCRON==1)); then
+     cron_management
+fi
+
+if ((ARG_INSTALL==1 || ARG_UNINSTALL==1)); then
+     install_script
+fi
+
+
+cleanup_and_exit_with_code 0
+# **************** end of script proper ****************
