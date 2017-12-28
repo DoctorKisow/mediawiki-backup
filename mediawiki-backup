@@ -474,7 +474,7 @@ function configuration_file ()
                     die "Cannot proceed; please create ${CONFFILE} manually."
                fi
           fi
-          
+
           source "${CONFFILE}"
      fi
 }
@@ -538,9 +538,9 @@ function check_superuser ()
 function internal_consistency_option_checks()
 {
      ### The following are not exhaustive, just some more obvious snafus.
-     
+
      # If help is run with ANY other option exit.
-     if ((ARG_HELP==1)); then 
+     if ((ARG_HELP==1)); then
           if ((ARG_BACKUP==1 || ARG_BACKUPROOT==1 || ARG_CONFIG==1 || ARG_USECONFIG==1 || ARG_CRON==1 || ARG_UNCRON==1 || ARG_DBHOST==1 || ARG_DBNAME==1 || ARG_INSTALL==1 || ARG_UNINSTALL==1 || ARG_DBPASS==1 || ARG_DBUSER==1 || ARG_LOG==1 || ARG_RESTORE==1 || ARG_VERSION==1 || ARG_WEBROOT==1 || ARG_SITEDIR==1)); then
                warning "You cannot use the help option with any other option!"
                cleanup_and_exit_with_code 1
@@ -572,7 +572,7 @@ function internal_consistency_option_checks()
           warning "You cannot set and unset the cron job in the same operation!"
           cleanup_and_exit_with_code 1
      fi
-     
+
      # If install or uninstall is run with ANY other option exit.
      if ((ARG_INSTALL==1 || ARG_UNINSTALL==1)); then
           if ((ARG_BACKUP==1 || ARG_BACKUPROOT==1 || ARG_CONFIG==1 || ARG_USECONFIG==1 || ARG_CRON==1 || ARG_UNCRON==1 || ARG_DBHOST==1 || ARG_DBNAME==1 || ARG_DBPASS==1 || ARG_DBUSER==1 || ARG_HELP==1 || ARG_LOG==1 || ARG_RESTORE==1 || ARG_VERSION==1 || ARG_WEBROOT==1 || ARG_SITEDIR==1)); then
@@ -580,7 +580,7 @@ function internal_consistency_option_checks()
                cleanup_and_exit_with_code 1
           fi
      fi
-     
+
      # If you attempt to install and uninstall in the same operation then exit.
      if ((ARG_INSTALL==1 && ARG_UNINSTALL==1)); then
           warning "You cannot use the install and uninstall script options in the same operation!"
@@ -715,14 +715,14 @@ function backup_mediawiki ()
           warning "The file $BACKUPDIR/$FQDN-$DATESTAMP.tgz already exists."
           if test_yn "Would you like to overright"; then
                rm  $BACKUPDIR/$FQDN-$DATESTAMP.tgz
-               
+
                printf "Creating and compressing the final TARball archive.\n"
                tar -czf $BACKUPDIR/$FQDN-$DATESTAMP.tgz -C $TEMPDIR {filecontent.tar,dbcontent.sql}
           else
                cleanup_and_exit_with_code 1
           fi
      fi
-     
+
      # Remove the working directory.
      printf "Removing the temporary working dir $TEMPDIR.\n"
      rm -r $TEMPDIR
@@ -765,12 +765,12 @@ function restore_mediawiki ()
      # Extract the archive.
      printf "  Recovering the archive into $FQDNDATESTAMP.\n"
      tar -xzf ${FILE_LIST[$INPUT]} -C $FQDNDATESTAMP
-     
+
      printf "  Recovering the MediaWiki site into $FQDNDATESTAMP.\n"
      tar -xf $FQDNDATESTAMP/filecontent.tar -C $FQDNDATESTAMP
      rm $FQDNDATESTAMP/filecontent.tar
      #cp -TR $FQDNDATESTAMP/$SITEDIR/ $WEBROOTDIR/$SITEDIR/
-     
+
      printf "  Restoring the SQL database.\n"
      #mysql -u $DBUSER -p $DBPASS $DBNAME < $FQDNDATESTAMP/dbcontent.sql
 }
@@ -781,7 +781,7 @@ function cron_management ()
           warning "To properly setup a daily cron job you must first install the script."
           cleanup_and_exit_with_code 1
      fi
-     
+
      if ((ARG_CRON==1)); then
           if [ -e /etc/cron.daily/mediawiki-backup ]; then
                warning "A daily cron job already setup."
@@ -790,7 +790,7 @@ function cron_management ()
 
           printf "  Setting up a daily cron job for MediaWiki backup.\n"
           printf "#!/bin/bash\n" >> /etc/cron.daily/mediawiki-backup
-          printf "${INSTALLDIR} -b -C -l" >> /etc/cron.daily/mediawiki-backup
+          printf "/bin/bash -c ${INSTALLDIR} -b -C -l\n" >> /etc/cron.daily/mediawiki-backup
 
           # Set permissions and ownership.
           chmod 755 /etc/cron.daily/mediawiki-backup
@@ -813,7 +813,7 @@ function cron_management ()
 function install_script ()
 {
      local SCRIPT_PATH
-     
+
      # Obtain the relative and absolute path where the script is executed from.
      SCRIPT_PATH="`dirname \"$0\"`"
      SCRIPT_PATH="`( cd \"$SCRIPT_PATH\" && pwd )`"
@@ -833,7 +833,7 @@ function install_script ()
           # Install script from the download directory.
           printf "  Installing ${PROGNAME} to ${INSTALLDIR}.\n"
           cp "${SCRIPT_PATH}/${PROGNAME}" "${INSTALLDIR}/${PROGNAME}"
-          
+
           # Set permissions and ownership.
           chmod 755 "${INSTALLDIR}/${PROGNAME}"
           chown root:root "${INSTALLDIR}/${PROGNAME}"
@@ -850,7 +850,7 @@ function install_script ()
           # Remove the script form /usr/sbin.
           printf "  Uninstalling ${PROGNAME} from ${INSTALLDIR}.\n"
           rm "${INSTALLDIR}/${PROGNAME}"
-          
+
           printf "  Cleaning up configuration files from /etc/${PROGNAME}.\n"
           rm "${CONFFILE}"
      fi
