@@ -783,30 +783,30 @@ function cron_management ()
      fi
 
      if ((ARG_CRON==1)); then
-          if [ -e /etc/cron.daily/mediawiki-backup ]; then
+          if [ -e /etc/cron.daily/mwbackup ]; then
                warning "A daily cron job already setup."
                cleanup_and_exit_with_code 1
           fi
 
           printf "  Setting up a daily cron job for MediaWiki backup.\n"
-          printf "#!/bin/bash\n" >> /etc/cron.daily/mediawiki-backup
-          printf "/bin/bash -c ${INSTALLDIR} -b -C -l\n" >> /etc/cron.daily/mediawiki-backup
+          printf "#!/bin/sh\n" >> /etc/cron.daily/mwbackup
+          printf "/bin/sh -c ${INSTALLDIR} -b -C -l\n" >> /etc/cron.daily/mwbackup
 
           # Set permissions and ownership.
-          chmod 755 /etc/cron.daily/mediawiki-backup
-          chown root:root /etc/cron.daily/mediawiki-backup
+          chmod 755 /etc/cron.daily/mwbackup
+          chown root:root /etc/cron.daily/mwbackup
 
           cleanup_and_exit_with_code 0
      fi
 
      if ((ARG_UNCRON==1)); then
-          if [ ! -e /etc/cron.daily/mediawiki-backup ]; then
+          if [ ! -e /etc/cron.daily/mwbackup ]; then
                warning "A daily cron job is not already setup."
                cleanup_and_exit_with_code 1
           fi
 
           printf "  Removing the daily cron job for MediaWiki backup.\n"
-          rm /etc/cron.daily/mediawiki-backup
+          rm /etc/cron.daily/mwbackup
      fi
 }
 

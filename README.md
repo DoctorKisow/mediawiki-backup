@@ -4,14 +4,6 @@
 Copyright &copy; 2015-2017, Matthew R. Kisow, D.Sc. <matthew.kisow@kisow.org>
 
 ## Tasks
-- [ ] Modify the cron_management function:
-```script
-     from:
-          /usr/sbin/mediawiki-backup -b -C -l
-     
-     to:
-          bash -c "/usr/sbin/mediawiki-backup -b -C -l"
-```
 - [ ] Create a clobber/no-clobber flag for unattended backups.
 
 ## Installation
